@@ -1,0 +1,12 @@
+[Unit]
+Description=Mi8 microphone capture route (WCD9340 AMIC->ADC3->DEC0->SLIM TX0)
+After=sound.target
+Before=graphical.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mi8-mic-route.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

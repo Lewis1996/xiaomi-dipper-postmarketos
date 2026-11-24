@@ -1,0 +1,8 @@
+[Unit]
+Description=Mi8 charge limit (keep 60-80%)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mi8-charge-limit.sh
+
+[Install]
+WantedBy=multi-user.target

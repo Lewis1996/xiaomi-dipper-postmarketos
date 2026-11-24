@@ -1,0 +1,44 @@
+# Reference: https://wiki.nura.eco/wiki/Deviceinfo
+# Please use double quotes only. You can source this file in shell scripts.
+
+deviceinfo_format_version="0"
+deviceinfo_name="Xiaomi Mi 8"
+deviceinfo_manufacturer="Xiaomi"
+deviceinfo_codename="xiaomi-dipper"
+deviceinfo_year="2018"
+deviceinfo_arch="aarch64"
+
+# Device tree built by linux-postmarketos-qcom-sdm845-dipper
+deviceinfo_dtb="qcom/sdm845-xiaomi-dipper"
+deviceinfo_append_dtb="true"
+deviceinfo_flash_kernel_on_update="true"
+
+# Device related (Mi 8: 6.21" 1080x2248 Samsung AMOLED, 6 GB RAM, 128 GB UFS)
+deviceinfo_drm="true"
+deviceinfo_chassis="handset"
+deviceinfo_screen_width="1080"
+deviceinfo_screen_height="2248"
+deviceinfo_rootfs_image_sector_size="4096"
+
+# Bootloader related (same offsets as xiaomi-beryllium / SDM845 fastboot)
+deviceinfo_flash_method="fastboot"
+# Keep the console enabled: works around a display-initialisation race,
+# see https://gitlab.freedesktop.org/drm/msm/-/issues/46
+deviceinfo_generate_bootimg="true"
+deviceinfo_flash_offset_base="0x00000000"
+deviceinfo_flash_offset_kernel="0x00008000"
+deviceinfo_flash_offset_ramdisk="0x01000000"
+deviceinfo_flash_offset_second="0x00f00000"
+deviceinfo_flash_offset_tags="0x00000100"
+deviceinfo_flash_pagesize="4096"
+deviceinfo_flash_sparse="true"
+deviceinfo_initfs_compression="zstd:fast"
+
+# USB gadget: default is ncm.usb0 @ 0x18D1:0xD001. Windows has no built-in
+# CDC NCM driver and binds that VID/PID to the Android ADB driver, so the
+# initramfs USB network never enumerates on this host. RNDIS is natively
+# supported by Windows; use a Linux Foundation VID/PID to avoid the stale
+# ADB driver binding. This enables ssh/telnet to 172.16.42.1 for dmesg.
+deviceinfo_usb_network_function="rndis.usb0"
+deviceinfo_usb_idVendor="0x1D6B"
+deviceinfo_usb_idProduct="0x0104"

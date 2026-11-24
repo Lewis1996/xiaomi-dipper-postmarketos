@@ -1,0 +1,20 @@
+--- a/main/postmarketos-initramfs/init_functions.sh	2026-11-24 21:00:49.169071319 +0800
++++ b/main/postmarketos-initramfs/init_functions.sh	2026-11-24 21:00:49.171130930 +0800
+@@ -338,7 +338,7 @@
+ setup_dynamic_partitions() {
+ 	command -v make-dynpart-mappings > /dev/null || return
+ 	attempt_start=$(get_uptime_seconds)
+-	wait_seconds=10
++	wait_seconds=1
+ 	slot_number=0
+ 	for super_partition in $1; do
+ 		# Wait for mdev
+@@ -371,7 +371,7 @@
+ 		losetup_args="$losetup_args --sector-size $deviceinfo_rootfs_image_sector_size"
+ 	fi
+ 	attempt_start=$(get_uptime_seconds)
+-	wait_seconds=10
++	wait_seconds=1
+ 	echo "Trying to mount subpartitions for $wait_seconds seconds..."
+ 
+ 	# Subpartition init uses losetup, so make sure the loop module is loaded.

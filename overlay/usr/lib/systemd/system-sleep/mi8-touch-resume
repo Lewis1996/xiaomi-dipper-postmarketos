@@ -1,0 +1,38 @@
+#!/bin/sh
+# mi8-touch-resume.sh — s2idle 唤醒后的设备恢复
+#
+# 现象：长时间熄屏（s2idle）唤醒后触摸失效，dmesg 里是
+#   geni_i2c a98000.i2c: DMA txn failed:3 / GPI transfer failed: -5
+# 即 GENI I2C 的 GPI/DMA 引擎在 resume 后没恢复，触摸所有 i2c 读写失败
+# （chip_id 读回 0、中断不再上报）。rebind 控制器能重新初始化 GPI，
+# 触摸随之恢复；同时 USB gadget(RNDIS) 在 resume 后也常丢失，一并拉起。
+set -u
+DEV=a98000.i2c
+
+case "${1:-}" in
+    post|thaw)
+        logger -t mi8-touch "resume: rebuilding $DEV"
+
+        for d in /sys/bus/platform/drivers/*i2c*; do
+            [ -e "$d/$DEV" ] || continue
+            echo "$DEV" > "$d/unbind" 2>/dev/null || true
+            sleep 1
+            echo "$DEV" > "$d/bind" 2>/dev/null || true
+            sleep 1
+            logger -t mi8-touch "rebound via $d"
+        done
+
+        # 兜底：触摸若仍未绑定，手动 bind
+        sleep 1
+        if [ ! -e /sys/bus/i2c/drivers/stmfts/14-0049 ]; then
+            echo 14-0049 > /sys/bus/i2c/drivers/stmfts/bind 2>/dev/null || true
+        fi
+
+        # USB gadget 恢复（否则唤醒后电脑看不到设备）
+        sleep 2
+        systemctl restart usb-gadget-fixup.service 2>/dev/null \
+            || /usr/bin/usb-gadget-fixup.sh 2>/dev/null || true
+
+        logger -t mi8-touch "resume done, irq=$(grep -m1 stmfts /proc/interrupts | awk '{print $2}')"
+        ;;
+esac

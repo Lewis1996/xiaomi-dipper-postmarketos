@@ -1,0 +1,7 @@
+# The GPU probes from the initramfs, before the real root is mounted, so the
+# zap shader has to travel with the initramfs or request_firmware_direct()
+# fails with -ENOENT and the GPU never leaves software rendering.
+/usr/lib/firmware/qcom/a630_gmu.bin
+/usr/lib/firmware/qcom/a630_sqe.fw
+/usr/lib/firmware/qcom/sdm845/Xiaomi/dipper/a630_zap.mbn
+/usr/lib/firmware/qcom/sdm845/Xiaomi/dipper/st_fts_e1.ftb

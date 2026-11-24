@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodically restore the RNDIS gadget
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=20s
+
+[Install]
+WantedBy=timers.target

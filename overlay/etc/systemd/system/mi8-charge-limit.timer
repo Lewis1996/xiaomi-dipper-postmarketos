@@ -1,0 +1,9 @@
+[Unit]
+Description=Mi8 charge limit tick
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=120s
+
+[Install]
+WantedBy=timers.target

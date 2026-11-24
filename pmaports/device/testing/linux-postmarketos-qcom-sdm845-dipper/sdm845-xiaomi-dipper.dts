@@ -1,0 +1,475 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Xiaomi Mi 8 (dipper, 6 GB + 128 GB UFS) — SDM845 mainline device tree
+ * Target kernel: sdm845-mainline/linux sdm845/7.1-dev (linux 7.1-rc1)
+ *
+ * Strategy: reuse the upstream, verified sdm845-xiaomi-beryllium-common.dtsi
+ * (same SDM845 SoC, same Xiaomi board family: identical TLMM reserved
+ * ranges, panel reset GPIO 6, touch IRQ/RESET GPIO 31/32) and override only
+ * the parts that differ on dipper:
+ *   - Samsung EA8074 1080x2248 AMOLED command-mode panel
+ *   - ST FTS5 (st,stmfts5) touchscreen on i2c14 @ 0x49 + 3.0 V avdd (L28)
+ *   - WCD9340 capture DAPM routing (ADC -> MCLK)
+ *   - 3400 mAh battery / 2248-line boot splash framebuffer
+ *
+ * Data sources:
+ *   - upstream : arch/arm64/boot/dts/qcom/sdm845-xiaomi-beryllium-common.dtsi
+ *   - downstream: Xiaomi_Kernel_OpenSource-dipper-q-oss (Linux 4.9.186)
+ *       arch/arm64/boot/dts/qcom/dipper-p0.dtsi        (board-id, FTS @ 0x49)
+ *       arch/arm64/boot/dts/qcom/dsi-panel-ss-notch-fhd-ea8074-cmd.dtsi
+ *
+ * !!! HARDWARE VERIFICATION REQUIRED !!!
+ * The items marked VERIFY below come from downstream/vendor data or from
+ * beryllium and have NOT been confirmed on a real dipper with mainline Linux.
+ * Boot with `fastboot boot` first; never flash boot/userdata before the DT
+ * has been validated. See docs/HARDWARE-NOTES.md.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include "sdm845-xiaomi-beryllium-common.dtsi"
+
+/ {
+	model = "Xiaomi Mi 8 (dipper)";
+	compatible = "xiaomi,dipper", "qcom,sdm845";
+
+	/* VERIFY: downstream dipper-p0.dts uses <30 0>; dipper-p1-v2.1-cn.dts
+	 * uses <51 0>. Since we append the DTB directly (no QCDT selection),
+	 * this value is mostly informational for splash/board matching. */
+	qcom,board-id = <30 0>;
+
+	/* 1080x2248 boot splash; beryllium-common uses 2246 for Poco F1. */
+	chosen {
+		framebuffer {
+			height = <2248>;
+		};
+	};
+};
+
+/* Mi 8 has a 3400 mAh cell (beryllium/Poco F1: 4000 mAh) */
+&battery {
+	charge-full-design-microamp-hours = <3400000>;
+};
+
+/*
+ * 3.3 V analog supply for the FTS5 touch controller.
+ * The stock DTS pins L28 at a fixed 3.3 V (init-voltage 3300000) and marks
+ * it boot-on.  Running it at 2.856 V keeps the controller's digital side
+ * alive (it ACKs on I2C) but its firmware never boots, so every register
+ * read returns 0.  regulator-boot-on is still avoided here because it
+ * crashes RPMh during early regulator registration on dipper; the touch
+ * driver enables the rail itself.
+ */
+/*
+ * r78: touch controller vdd (1.8 V), the downstream "disp_vddio_vreg" on
+ * GPIO 23.  Deliberately NOT regulator-boot-on / always-on: the stmfts
+ * driver enables it, exactly like the working Mi 8 mainline bring-up.
+ */
+/ {
+	ts_vdd_vreg: ts-vdd-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "ts_vdd";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 23 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+};
+
+&apps_rsc {
+	regulators-0 {
+		/* r72: the touch controller's vddio is PM8998 L14 (1.8 V,
+		 * always-on), not the display's GPIO23-controlled rail.
+		 * stmfts probes before the display driver, so a
+		 * display-dependent supply would leave the controller half
+		 * powered: it ACKs on I2C but its firmware never boots.
+		 */
+		vreg_l14a_1p8: ldo14 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-boot-on;
+			regulator-always-on;
+		};
+
+		vreg_l28a_3p0: ldo28 {
+			/* r66: back to a real regulator node so the touch driver
+			 * has a genuine consumer to enable (the previous
+			 * "disabled + fake fixed regulator" only changed what the
+			 * software reported, not the rail).  The stock DTS pins
+			 * this at 3.300 V with qcom,init-voltage + boot-on, but
+			 * RPMh on dipper rejects any voltage request for this
+			 * resource (rpmh_write times out), so keep the plain
+			 * range and let XBL's value stand.
+			 */
+			/* r72: 2.856 V is enough -- the Mi 8 mainline bring-up
+			 * reports working 10-point touch with exactly this
+			 * hardware range and no voltage change.  Keep the range
+			 * and never try to re-program it (RPMh hangs).
+			 */
+			regulator-min-microvolt = <2856000>;
+			regulator-max-microvolt = <3312000>;
+			/* r107: 触摸 AVDD 是这条 L28。之前没有 always-on，
+			 * 系统进 s2idle 时被 regulator core 关掉，控制器整片
+			 * 断电；而 stmfts 只在 probe 里使能一次（devm），
+			 * 唤醒后不会重新上电 —— 表现就是长时间熄屏后触摸
+			 * 全死（i2c 读回全 0、中断计数不涨），rebind 才恢复。
+			 * 常开后芯片在 suspend 里自己进低功耗，待机影响很小。
+			 */
+			regulator-always-on;
+		};
+	};
+};
+
+/*
+ * Display: Samsung EA8074, 6.21" 1080x2248@60 AMOLED, DSI command mode.
+ * The upstream common DTSI already enables &mdss / &mdss_dsi0 / phy and
+ * declares the panel@0 node with regulators and reset GPIO 6.
+ * We only swap the compatible and drop the WLED backlight (AMOLED uses
+ * DCS 0x51 brightness, handled by panel-samsung-ea8074.c).
+ */
+&display_panel {
+	compatible = "samsung,ea8074";
+	status = "okay";
+
+	/delete-property/ backlight;
+
+	/* Downstream dipper-p0.dtsi disables the whole LAB/IBB boost; Mi 8's
+	 * AMOLED is not powered from PMI8998 lab/ibb. Keeping beryllium's
+	 * vddpos/vddneg phandles points the panel at a regulator that just
+	 * crashed in its OCP ISR. The panel driver treats these as optional. */
+	/delete-property/ vddpos-supply;
+	/delete-property/ vddneg-supply;
+
+	/* inherited from beryllium-common, repeated for clarity:
+	 *   vddio-supply = <&vreg_l14a_1p8>;
+	 *   reset-gpios  = <&tlmm 6 GPIO_ACTIVE_LOW>;
+	 */
+};
+
+/*
+ * Xiaomi Mi 8 does NOT use the PMI8998 LAB/IBB boost:
+ *   downstream dipper-p0.dtsi:  &labibb { status = "disabled"; };
+ * beryllium-common.dtsi enables lab/ibb with regulator-over-current-protection,
+ * which on dipper fires irq 87 early and NULL-derefs in qcom_labibb_ocp_isr()
+ * (verified in dmesg: "Oops ... Comm: irq/87-lab-over"), then fails the
+ * lab/ibb device links. Disable the parent by absolute path (mainline's
+ * pmi8998.dtsi has no label on this node).
+ */
+&{/soc@0/spmi@c440000/pmic@3/labibb} {
+	status = "disabled";
+};
+
+/*
+ * Display I/O rail. Downstream dipper-p0.dtsi:99 defines disp_vddio_vreg as
+ * a regulator-fixed enabled by TLMM GPIO 23 (enable-active-high, 4 ms
+ * startup delay, regulator-boot-on) and feeds it to the panel/touch vddio.
+ * beryllium-common.dtsi instead hard-wires vreg_l14a_1p8. Without powering
+ * this rail the panel never lights up even though DSI PLL/byte clocks lock
+ * and the DPU keeps scanning (verified on hardware: crtc total_framecount
+ * keeps increasing, screen stays black, writing /dev/fb0 has no effect).
+ */
+/ {
+
+	/*
+	 * Panel VCI 3.0 V rail. Downstream dipper-p0.dtsi:90 defines
+	 * disp_vci_vreg as a regulator-fixed on TLMM GPIO 35 and the panel
+	 * supply array (dsi_amoled_panel_pwr_supply) lists TWO entries:
+	 *   vddio 1.8 V  + vci 3.0 V (post-on-sleep 10 ms)
+	 * Only wiring vddio leaves the panel unpowered: DSI PLL locks, DPU
+	 * scans frames, fb0 gets content, but the screen stays fully black.
+	 */
+	disp_vci_vreg: regulator-disp-vci {
+		compatible = "regulator-fixed";
+		regulator-name = "disp_vci_vreg";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3000000>;
+		startup-delay-us = <4000>;
+		enable-active-high;
+		regulator-boot-on;
+		gpio = <&tlmm 35 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&display_panel {
+	/* r81: the working Mi 8 mainline DT feeds the panel's vddio from
+	 * PM8998 L14 and leaves GPIO 23 exclusively to the touch controller.
+	 * Using disp_vddio_vreg (GPIO 23) here made the touch regulator fight
+	 * the panel for the same GPIO, so touch had no 1.8 V rail.
+	 */
+	vddio-supply = <&vreg_l14a_1p8>;
+	vci-supply = <&disp_vci_vreg>;
+};
+
+/*
+ * TE (tearing effect) input from the panel.
+ *
+ * The vendor dtsi marks this panel as qcom,mdss-dsi-te-using-te-pin with
+ * qcom,platform-te-gpio = <&tlmm 10 0>, and samsung_ea8074_on() already sends
+ * 0x35 0x00 (TE on). On sdm845 the TE line is NOT routed through the DSI
+ * controller: it is muxed straight into the display processor as an MDP vsync
+ * source - which is why the pin function is "mdp_vsync" (there is no "mdss_te"
+ * function in pinctrl-sdm845.c) and why dpu_kms_dsi_set_te_source() defaults to
+ * DPU_VSYNC_SOURCE_GPIO_0 ("mdp_vsync_p") when qcom,te-source is absent.
+ *
+ * msm_dsi_host_power_on() calls pinctrl_pm_select_default_state() on the DSI
+ * device, so attaching the state to &mdss_dsi0 applies it exactly when the link
+ * is brought up, and the DPU's PP tear-check can then follow the panel.
+ */
+&tlmm {
+	mdss_te_active: mdss-te-active-state {
+		pins = "gpio10";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+};
+
+&mdss_dsi0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdss_te_active>;
+};
+
+&mdss_dsi0_out {
+	/* Where the DPU should take its tear/vsync reference from. */
+	qcom,te-source = "mdp_vsync_p";
+};
+
+/*
+ * Touch: STMicroelectronics FingerTip S (FTS5), downstream "st,fts" @ 0x49.
+ *
+ * r27: the bus is bit-banged through i2c-gpio instead of using the GENI SE.
+ * a98000.i2c reports its FIFO as disabled in hardware, so geni_i2c has to run
+ * every transfer through the GPI DMA engine, and that engine deadlocks after a
+ * few hundred touch reads ("cmd: CH STOP completion timeout" -> every later
+ * transfer returns -110, permanently, until reboot). GPIO 33/34 are the very
+ * same two wires muxed as qup14, so i2c-gpio drives them directly.
+ */
+/*
+ * r79: the touch controller hangs off QUPv3 instance 1 through the GPI DMA
+ * engine.  Without these the GENI driver had to fall back to PIO (our old
+ * geni-i2c-no-dma workaround) and transfers came back incomplete, which is
+ * what made the cursor jump / only part of the panel respond.
+ */
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&gpi_dma1 {
+	status = "okay";
+};
+
+&gpi_dma0 {
+	status = "okay";
+};
+
+/*
+ * r84: enable the Adreno zap shader.  Without this node the GPU comes up
+ * without the signed zap firmware and falls back to a degraded path, which
+ * is what made the desktop feel laggy.  The blob is extracted from the stock
+ * vendor image (a630_zap.mdt + .bNN merged with pil-squash.py).
+ */
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sdm845/Xiaomi/dipper/a630_zap.mbn";
+};
+
+&i2c14 {
+	status = "okay";
+
+	/* r80: node copied verbatim from the working Mi 8 mainline DT
+	 * (Mechres/xiaomi-mi8-dipper): no clock-frequency override, no
+	 * pinctrl, interrupts-extended, and the stock stmfts driver.
+	 */
+	touchscreen@49 {
+		compatible = "st,stmfts5";
+		reg = <0x49>;
+
+		/* r83: gpio31/gpio32 are also listed by the QUP11 pinctrl
+		 * states; without an explicit state the IRQ/reset pins can stay
+		 * muxed away from GPIO.  Pin them as GPIO with pull-up.
+		 */
+		pinctrl-names = "default", "sleep";
+		pinctrl-0 = <&dipper_ts_active>;
+		pinctrl-1 = <&dipper_ts_int_suspend &dipper_ts_reset_suspend>;
+
+		interrupts-extended = <&tlmm 31 IRQ_TYPE_LEVEL_LOW>;
+		avdd-supply = <&vreg_l28a_3p0>;
+		vdd-supply = <&ts_vdd_vreg>;
+		reset-gpios = <&tlmm 32 GPIO_ACTIVE_LOW>;
+		/* The controller reports the panel's full 1080x2248 coordinate
+		 * space (verified by touching the bottom edge), so declare it
+		 * as-is; a smaller range would compress the mapping and leave
+		 * an 88 px dead band at the bottom.
+		 */
+		touchscreen-size-x = <1080>;
+		touchscreen-size-y = <2248>;
+	};
+};
+
+&tlmm {
+	/* r64: dipper pinctrl from dipper-p0-pinctrl.dtsi: ts_active pulls BOTH
+	 * touch lines up (IRQ is active low and must idle high); the inherited
+	 * beryllium state used bias-pull-down on gpio31.
+	 */
+	dipper_ts_active: dipper-ts-active-state {
+		pins = "gpio31", "gpio32";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-pull-up;
+	};
+
+	dipper_ts_int_suspend: dipper-ts-int-suspend-state {
+		pins = "gpio31";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	dipper_ts_reset_suspend: dipper-ts-reset-suspend-state {
+		pins = "gpio32";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	touch_i2c_gpio: touch-i2c-gpio-state {
+		pins = "gpio33", "gpio34";
+		function = "gpio";
+		drive-open-drain;
+		bias-pull-up;
+	};
+};
+
+
+/*
+ * Audio: WCD9340 capture is silent unless playback is active on beryllium,
+ * because the machine driver only wires MCLK into the playback DAPM path.
+ * Adding ADC -> MCLK edges fixes standalone mic capture without C changes.
+ * VERIFY the MIC BIAS mapping against your board revision.
+ */
+&sound {
+	model = "Xiaomi Mi 8 (dipper)";
+	audio-routing =
+		"RX_BIAS", "MCLK",
+		"ADC1", "MCLK",
+		"ADC2", "MCLK",
+		"ADC3", "MCLK",
+		"AMIC1", "MIC BIAS4",
+		"AMIC2", "MIC BIAS2",
+		"AMIC3", "MIC BIAS1";
+};
+
+/*
+ * TrustZone-protected SPI GPIOs (fingerprint / eSE) are already reserved in
+ * beryllium-common.dtsi: gpio-reserved-ranges = <0 4>, <81 4>;
+ * Without it pinctrl-msm touches GPIO 0/81 and the SoC resets before USB.
+ * VERIFY on dipper: if the phone hangs on the Mi splash, this is the first
+ * thing to bisect (see docs/HARDWARE-NOTES.md).
+ */
+
+/*
+ * Firmware paths stay qcom/sdm845/Xiaomi/beryllium/* on purpose: this port
+ * reuses the packaged firmware-xiaomi-beryllium APKBUILD (same SDM845
+ * adsp/mba/modem/cdsp/venus/zap blobs). For a production port, pull the
+ * blobs from your own LineageOS device with firmware/extract-firmware.sh
+ * and repackage them as firmware-xiaomi-dipper.
+ */
+
+/*
+ * r102: 扬声器功放复位脚。beryllium-common.dtsi 给 tas2559 用的是 GPIO 12
+ * （Poco F1 的接法），dipper 的功放复位是 GPIO 76。用错脚芯片一直停在复位态，
+ * I2C 读回 -EIO -> "tas2559 5-004c: probe with driver tas2559 failed with error -5"
+ * -> 声卡 msm-snd-sdm845 报 "Primary Spkr Playback: codec dai not found"，
+ * 于是完全没有 soundcard。实测参考 Mechres/xiaomi-mi8-dipper 的 DT。
+ */
+&i2c5 {
+	tas2559@4c {
+		/* r103: dipper 的功放是 TAS2557（vendor/firmware 只有
+		 * tas2557_uCDSP_{aac,goer}.bin，两者 md5 相同），不是
+		 * beryllium 的 TAS2559。用 2559 驱动会 probe 失败：
+		 * "tas2559 5-004c: I2c fail, -5"。
+		 */
+		compatible = "ti,tas2557";
+		ti,cdc-reset-gpios = <&tlmm 76 GPIO_ACTIVE_HIGH>;
+		ti,tas2559-reset-gpio = <&tlmm 76 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/*
+ * r102: 霍尔开关（皮套/翻盖）在 GPIO 124，下游 DT 叫 hall_key。
+ * beryllium 的 gpio-keys 节点没有 label 无法追加，这里单独建一个 gpio-keys 实例。
+ */
+/ {
+	gpio-hall {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&hall_sensor_default>;
+
+		switch-hall {
+			label = "Hall Effect Sensor";
+			gpios = <&tlmm 124 GPIO_ACTIVE_LOW>;
+			linux,input-type = <EV_SW>;
+			linux,code = <SW_LID>;
+			wakeup-source;
+		};
+	};
+};
+
+&tlmm {
+	hall_sensor_default: hall-sensor-default-state {
+		pins = "gpio124";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		input-enable;
+	};
+};
+
+
+/*
+ * r106: 通话音频。上游（OnePlus 6 / sdm845）没有 VoiceMMode1 dai-link，
+ * 通话声音走 SLIMBUS_1 + WCD9340 AIF2：
+ *   下行 SLIMBUS_1_RX -> AIF2_PB -> SLIM RX0 -> RX INT0 -> 听筒
+ *   上行 麦克风 -> DEC0/AIF2_CAP -> SLIMBUS_1_TX
+ * 只加 cpu 或加错 codec 会让声卡 instantiate 失败（-19），必须 cpu+platform+codec 齐全。
+ */
+&sound {
+	slim2-dai-link {
+		link-name = "SLIM Playback 2";
+
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_1_RX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&wcd9340 2>;	/* AIF2_PB */
+		};
+	};
+
+	slimcap2-dai-link {
+		link-name = "SLIM Capture 2";
+
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_1_TX>;
+		};
+
+		platform {
+			sound-dai = <&q6routing>;
+		};
+
+		codec {
+			sound-dai = <&wcd9340 3>;	/* AIF2_CAP */
+		};
+	};
+};

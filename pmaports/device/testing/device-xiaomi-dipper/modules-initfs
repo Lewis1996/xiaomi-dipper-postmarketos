@@ -1,0 +1,9 @@
+# Modules required in the initramfs for early boot, USB networking,
+# charging and touch input. Derived from device-xiaomi-beryllium's
+# modules-initfs.tianma with the Novatek touch drivers replaced by
+# stmfts (CONFIG_TOUCHSCREEN_STMFTS=m in the sdm845 7.1 config).
+gpi
+i2c_qcom_geni
+qcom_pmi8998_charger
+qcom_fg
+stmfts

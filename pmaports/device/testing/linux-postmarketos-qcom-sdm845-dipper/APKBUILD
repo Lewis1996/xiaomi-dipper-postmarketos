@@ -1,0 +1,461 @@
+# Maintainer: local dipper port
+# Based on Nura pmaports device/community/linux-postmarketos-qcom-sdm845
+# (pkgver 7.1_rc1, pkgrel 4, kernel sdm845/7.1-dev).
+#
+# Differences from the upstream package:
+#   * adds arch/arm64/boot/dts/qcom/sdm845-xiaomi-dipper.dts
+#   * builds drivers/gpu/drm/panel/panel-samsung-ea8074.c into the kernel
+#     (obj-y, display must own MDSS early - see docs/HARDWARE-NOTES.md)
+#   * config disables CONFIG_DEBUG_INFO_BTF / _MODULES: pahole 1.32 segfaults
+#     while generating BTF inside the WSL2 Alpine chroot (kernel suggests
+#     "Try to disable CONFIG_DEBUG_INFO_BTF"). BTF is debug-only, no runtime impact.
+#   * everything else (config, toolchain, install) is identical to upstream
+maintainer="dipper local port <dipper@example.com>"
+_flavor="postmarketos-qcom-sdm845-dipper"
+pkgname=linux-$_flavor
+pkgver=7.1_rc1
+# r1: fix EA8074 init sequence writing DCS 0x51 brightness=0 (screen went
+#     black right after the kernel penguin); set max brightness 1023 instead.
+# r2: disable PMI8998 LAB/IBB per downstream dipper-p0.dtsi and drop the
+#     panel's vddpos/vddneg supplies. On dipper the beryllium lab/ibb config
+#     fires irq 87 and NULL-derefs in qcom_labibb_ocp_isr() at 0.226s, which
+#     breaks panel supplies and is followed by DSI PLL lock failures.
+# r3: add disp_vddio_vreg (regulator-fixed on TLMM GPIO 23) and route the
+#     panel's vddio through it, per downstream dipper-p0.dtsi:99. Hardware
+#     test showed DSI clocks locked + DPU scanning 3980 frames while the
+#     screen stayed completely black -> display I/O rail was never powered.
+# r4: panel driver now uses MIPI_DSI_MODE_VIDEO_BURST (downstream
+#     qcom,mdss-dsi-traffic-mode = "burst_mode"), same as panel-samsung-ea8076.c.
+#     Pure command mode gave the DPU no frame-push path: clocks locked and the
+#     DPU scanned 3980 frames, but nothing reached the panel.
+# r5: revert to command mode (r4 VIDEO_BURST did not light the panel either)
+#     and add DCS read-back diagnostics (GET_POWER_MODE/DISPLAY_MODE/PIXEL_
+#     FORMAT) in prepare() to tell "init never reached the panel" from
+#     "panel is on but DPU does not push pixels".
+# r6: the DCS read-back blocked the whole initramfs (read channel never
+#     answers), so it is removed. Instead the post-exit-sleep delay is
+#     raised from the vendor's 10 ms to the MIPI-required 120 ms: with only
+#     10 ms the following 0x29 (set display on) is silently dropped.
+# r7: THE missing rail. Vendor dsi_amoled_panel_pwr_supply has TWO entries:
+#     vddio 1.8 V AND vci 3.0 V; panel node uses vci-supply = <&disp_vci_vreg>
+#     which is a regulator-fixed on TLMM GPIO 35 (dipper-p0.dtsi:90).
+#     Only vddio was wired, so the panel was never powered - matching every
+#     observed symptom (DSI locked, DPU scanning, fb0 has content, black screen).
+# r8: retry MIPI_DSI_MODE_VIDEO_BURST now that vci 3.0 V is actually present.
+#     The r4 burst experiment was invalid (panel unpowered back then). Vendor
+#     mdss_dsi.c drives cmd-mode panels with burst traffic + a first-frame
+#     kickoff (mdss_dsi_cmdlist_commit(ctrl, 1)); burst mode is mainline's
+#     equivalent path that pushes frames without an explicit kickoff.
+# r9: force video mode (MIPI_DSI_MODE_VIDEO | VIDEO_BURST). With r7/r8 the
+#     panel had both rails at the right voltage and DPU reported
+#     total_framecount increasing, yet the panel stayed dark, so try the
+#     continuous-scanout path instead of cmd-mode kickoff.
+# r10: video mode kept, but porches widened to 64/20/64 (EA8076 style).
+#      The downstream 56/18/56 blanking gave only 4 fps in video mode.
+# r11: back to cmd mode (video mode is dead): r10 boot took 179 s to reach
+#      the debug shell. Root cause found in dpu_hw_intf_enable_te(): it
+#      hard-codes INTF_TEAR_TEAR_CHECK_EN=1, so the DPU waits forever for a
+#      TE event that mainline never delivers (panel TE is TLMM GPIO 10 and
+#      dsi_host.c has no TE handling). Force that bit to 0 so the DPU pushes
+#      frames on its internal vsync cadence.
+# r12: tearcheck disable confirmed applied but screen still black, so add a
+#      DSI register dump in msm_dsi_host_enable() (STATUS0 / FIFO / ACK_ERR /
+#      TIMEOUT / EOT / CLK) to find out whether the DSI controller is
+#      actually pushing pixels.
+# r13: the first dump fired at 5.50 s, before the panel was on (5.78 s), so
+#      STATUS0=0 was meaningless. Move the dump into a delayed work that
+#      sleeps 3 s after host enable.
+# r14: r13 queued the 3 s sleep on the DSI ordered workqueue and deadlocked
+#      init (gadget never enumerated). Use schedule_delayed_work() on the
+#      system wq instead, so the DSI queue and err_work stay responsive.
+# r15: r11 only patched INTF tear-check, but sdm845 has DPU 4.0 and
+#      dpu_encoder_phys_cmd_init() leaves has_intf_te=false, so the real
+#      tear-check is on the PINGPONG block (dpu_hw_pingpong.c:105
+#      PP_TEAR_CHECK_EN=1) and the INTF patch never ran. Disable PP
+#      tear-check, enable PP autorefresh, stop disable_autorefresh()
+#      on every kickoff, and replace the single-point DSI dump with
+#      50 x 20 ms STATUS0 sampling on the system workqueue.
+# r16: r15 made the DSI cmd engines busy (STATUS0=0x5) but the panel
+#      still stayed black -> cmd-mode GRAM/TE refresh is the remaining
+#      suspect. Retry video mode now that PP tear-check is disabled
+#      (r9/r10 stalls were caused by the still-enabled tear-check).
+#      Injected via sed on the copied panel driver, so sha512sums stay.
+# r19: r16's video mode was pointless - the vendor dtsi says this panel is
+#      dsi_cmd_mode and video streams are simply not accepted. Back to cmd
+#      mode, and instead of guessing further call the tree's unused
+#      msm_dsi_host_test_pattern_en() right after host enable: it writes a
+#      checkerboard into panel GRAM without the DPU, so the next boot
+#      separates 'panel/link dead' from 'DPU content wrong'.
+# r20: ROOT CAUSE. reset-gpios is GPIO_ACTIVE_LOW, but
+#      samsung_ea8074_reset() copied downstream's physical sequence
+#      <1 1>,<0 1>,<1 10> verbatim. Logically that is assert -> release
+#      1 ms -> assert, so the panel stayed in reset for the entire init
+#      sequence. Writes are fire-and-forget, which is why every round
+#      looked 'healthy' while the DCS read channel never answered and the
+#      screen stayed black. Reset is now expressed in gpiod terms
+#      (0 = released / physical high), and the r19 TPG is dropped.
+# r21: panel is lit, so the r15 50 x 20 ms STATUS0 sampler is pure log
+#      noise - drop it (dump_work, its struct member, INIT and schedule).
+#      PP tear-check / autorefresh patches stay: TE routing does not exist
+#      yet. The panel driver now runs a one-shot DCS read 3 s after
+#      prepare() to prove the read channel really answers; it runs in a
+#      delayed work so a wedged read can never block boot again.
+# r22: real TE. sdm845 does not route the panel TE through the DSI
+#      controller - TLMM GPIO 10 is muxed as "mdp_vsync" straight into the
+#      display processor and picked up as DPU_VSYNC_SOURCE_GPIO_0. With that
+#      pinctrl state plus qcom,te-source in the DTS, the DPU tear-check can
+#      finally follow the panel, so the r11 INTF sed and the whole r15
+#      heredoc (PP_TEAR_CHECK_EN=0 / autorefresh / enable_te no-op) are
+#      removed and upstream tear-check behaviour is restored.
+# r23: touch. The FTS5 controller streams one record per slot on every scan
+#      (~37 Hz) with pressure 0 for every slot that is not touched; the old
+#      "zero pressure" workaround turned those records into ten permanent
+#      fingers, which made every tap and gesture disappear. Idle records are
+#      now dropped, stmfts5_parse_events() no longer aborts the whole batch on
+#      a status record, and accepted contacts log one line to dmesg.
+# r24: touch, part 2. stmfts_irq_handler() reads the whole 256-byte event
+#      stack on every scan (~37 Hz) while the bus was still at its 100 kHz
+#      default, so a single read took ~23 ms against a ~27 ms scan period.
+#      The chip's buffer backed up, the controller stretched the clock and the
+#      GENI/GPI engine wedged ("CH STOP completion timeout" -> every later
+#      transfer -110) about 5.5 minutes into every boot. The dipper touch bus
+#      now runs at 400 kHz (clock-frequency on &i2c14).
+# r25: touch, part 3 - and the C patches move to real .patch files.
+#      (a) The 5-minute bus wedge is the GPI DMA engine, not the chip:
+#          geni_i2c only takes the GPI path for messages >= 32 B and stmfts
+#          reads 256 B per interrupt, so the touch bus is a continuous DMA
+#          stream. geni_i2c now honours a "qcom,no-dma" DT property (sdm845
+#          could only set no_dma from platform data) and &i2c14 uses it.
+#      (b) stmfts pulses the touch reset GPIO after 5 consecutive read errors
+#          (self-heal) and dumps two raw records every 128 interrupts, so we
+#          can see what a real finger produces without racing /dev/i2c-14.
+#      (c) r23's inline heredoc is replaced by stmfts-touch.patch, which
+#          carries both the r23 pressure fix and the r25 additions.
+# r26: touch, part 4 - split the event read into two single-message transfers.
+#      geni_i2c takes the Qualcomm multi-descriptor GPI path for num >= 2 and
+#      that path is what deadlocks after a few minutes ('cmd: CH STOP
+#      completion timeout'). The FTS controller latches the read command, so
+#      a STOP between command and read is fine (verified 20/20 on the device).
+#      Also records that qcom,no-dma is a no-op on this SE (FIFO disabled).
+# r27: touch, part 5 - move touch off the GENI SE onto i2c-gpio, and use the
+#      vendor two-byte sense-on command.
+#      (a) a98000.i2c has its FIFO disabled in hardware, so geni_i2c must move
+#          every transfer through the GPI DMA engine (which is why qcom,no-dma
+#          did nothing in r25). That engine deadlocks after a few hundred touch
+#          reads and stays dead until reboot. GPIO 33/34 are the same two wires
+#          (qup14) - r27 muxes them back to GPIO and runs a bit-banged i2c-gpio
+#          bus at ~100 kHz with the FTS5 controller on it.
+#      (b) the stock driver sends {0x93, 0x01} as sense-on, not a bare 0x93 or a
+#          scan-mode write.
+#      CONFIG_I2C_GPIO becomes =y.
+# r28: touch diagnostics + SDA/SCL swap on the i2c-gpio bus.
+#      With r27 the stmfts probe failed with -ENXIO and printed nothing, which
+#      looks exactly like 'driver never tried'. The bus now logs the failure
+#      (and the first record on success). GPIO 33/34 are also swapped, since
+#      the geni pin order does not tell us which wire is SDA.
+# r29: put the event read back to a single two-message transfer.
+#      r26 split it into write-then-read to dodge the geni multi-descriptor
+#      path, but on i2c-gpio the read must stay in the same transaction with a
+#      repeated start: the split version made every read fail with -EIO (the
+#      controller had no command latched). r27 already moved the bus off geni,
+#      so the original combined transfer is both correct and safe here.
+# r30: touch VDD back to disp_vddio_vreg (GPIO23). vendor dipper-p0.dtsi:546
+#      wires touch vdd to disp_vddio_vreg and avdd to pm8998_l28; the port
+#      has been feeding vdd from L14, which lets I2C work but leaves the
+#      controller returning all-zero event data.
+# r31: use the REAL FTS5 pointer format from the stock driver.
+#      The stock fts_ts driver (fts.c fts_enter_pointer_event_handler +
+#      ftsSoftware.h) uses event ids 0x03 enter / 0x04 leave / 0x05 motion,
+#      touch id in the LOW nibble of event[1] (high nibble = touch count),
+#      x = (e[2]<<4)|((e[4]&0xF0)>>4), y = (e[3]<<4)|(e[4]&0x0F) and
+#      pressure = e[5]&0x3F. mainline's 0x13/0x23/0x33 guess with the id in
+#      the high nibble is a different protocol - that is why this controller
+#      never reported a single touch. Also touchscreen-size-y -> 2160, the
+#      real touch area (y vendor X/Y_AXIS_MAX in fts.h).
+# r32: port the stock driver bring-up sequence (readChipInfo + IER + A5 + sense on).
+#      The controller has been ACKing I2C but returning empty event records, which
+#      points at a controller that was never initialised: mainline only reads the
+#      FIFO once.  stmfts5_configure() now follows the stock fts_ts path -
+#      chip info block from the framebuffer (0xD0 @0x8000), hardware register
+#      reset (0xB6 @0x0023), CONTROL_READY (0x10) wait, IER write (0x001C=0x41)
+#      with read back so the bus read path is proven, full initialisation (0xA5)
+#      and sense on (0x93 0x01) - and logs every step so the failure point is
+#      visible in dmesg.
+# r33: command/response matrix for the FTS controller.
+#      r32 showed the controller ACKs every write and returns one 03 event
+#      right after 0xA5, but all register reads come back zero - so the bus
+#      works and the chip is listening.  This walks the stock init commands
+#      (sleep-out, sense-on, full-init, force-cal, cx-tuning, scan mode, IER)
+#      one at a time and logs every event each one produces, which pins down
+#      how far the controller's scanner actually gets.
+# r34: power cycle the analog rail and retry the reset before giving up.
+#      r32/r33 proved the controller ACKs writes but ignores every command and
+#      returns zero for all registers and events, which is what an FTS part
+#      looks like while it sits in its bootloader.  A reset pulse alone does not
+#      get it out of there; the stock driver's fts_chip_powercycle() cuts the
+#      supplies instead.  ldo28 (avdd) feeds the touch controller alone, so it
+#      can be cycled without touching the panel.  Also retries the reset once
+#      with a 300 ms pulse if CONTROL_READY does not show up.
+# r35: touch back on GENI (a98000.i2c at 400 kHz, qcom,no-dma) with the
+#      vendor bring-up.  r23-r26 read real records through this bus, so
+#      this run separates 'controller is alive, bit-banged bus is at fault'
+#      from 'controller itself stopped answering'.
+# r36: make the bring-up tunable from module parameters.
+#      The controller no longer runs its firmware: two different buses (GENI and
+#      i2c-gpio), a 100 ms reset and an avdd power cycle all give the same
+#      answer - I2C ACK, everything else zero.  pwrcycle, reset_ms and
+#      settle_ms let the power/reset combination be re-tried with a simple
+#      'modprobe stmfts ...' instead of a new kernel each time.
+# r37: keep the interrupt masked when the controller never reports CONTROL_READY.
+#      With no firmware the controller holds its IRQ line asserted, so the
+#      driver was draining a 256 byte transfer at every interrupt for nothing
+#      (and on GENI that GPI traffic is what deadlocks after a few minutes).
+#      The bring-up still runs and logs everything, but the system stays quiet
+#      until a working controller (firmware) is available.
+# r38: touch back on i2c-gpio (GPIO33/34).  The controller firmware now
+#      runs; GENI DMA errors during the initramfs handoff raced the USB
+#      gadget teardown into a NULL deref panic.  i2c-gpio has no DMA.
+# r39: non-FTM3 registers + vendor power sequence: reset 0x0028=0x80
+#      (was 0x0023=0x01), IER 0x002c (was 0x001c), avdd->2ms->vdd
+#      power-on, no duplicate GPIO reset in configure().
+# r40: FTS5 helper placement fix on top of r39 (non-FTM3 registers and power sequence).
+# r41: fix patch application order (power_on before helpers) and use non-FTM3 registers; place helpers before configure.
+# r42: do not mask the IRQ when CONTROL_READY(0x10) is missing. The stock
+#      fts_init() tolerates that timeout and still installs/enables the IRQ
+#      in fts_init_hw(); this controller answers with 0x03 events instead.
+# r42: do not mask the IRQ when CONTROL_READY(0x10) is missing. The stock
+#      fts_init() tolerates that timeout and still enables the IRQ in
+#      fts_init_hw(); this controller answers with 0x03 events instead.
+# r43: touch back on GENI &i2c14 (stock Android bus). i2c-gpio
+#      ACKs but reads back all zeros even with valid supplies.
+# r45: let reset_ms=0 skip the power_on GPIO pulse so the firmware loaded
+#      at cold power-on is preserved (test of the firmware-timing hypothesis).
+# r45: reset_ms=0 skips the power_on GPIO pulse to preserve cold-loaded firmware.
+# r45: reset_ms=0 skips the power_on GPIO pulse to preserve cold-loaded firmware.
+# r46: ldo28 (touch avdd) from LPM to HPM so the firmware can boot.
+# r47: upload the stock FTS firmware from the kernel when CONTROL_READY never
+#      arrives. Android does exactly this (fts_fw_update_auto ->
+#      fts_flash_procedure -> flashProcedure with the embedded fts_fw.h
+#      array); postmarketOS never did, so a controller with an empty or
+#      wrong flash only ACKed on I2C and returned zero bytes for the
+#      framebuffer and the event FIFO.
+# r47: upload the stock FTS firmware from the kernel when CONTROL_READY never arrives (same as Android's fts_fw_update_auto).
+# r47: upload the stock FTS firmware from the kernel when CONTROL_READY never arrives.
+# r48: flash_burn parity (drop the extra warm-boot write) + power-cycle retry
+#      and a 3 s CONTROL_READY window after the firmware upload.
+# r48: match flash_burn (no warm boot) + power-cycle retry, 3 s CONTROL_READY.
+# r49: GENI DMA back on (Android uses it; PIO mode returned all-zero reads),
+#      and the built-in firmware upload is now opt-in (wrong variant).
+# r49: GENI DMA re-enabled (stock driver uses it; PIO returned zero reads) and
+#      the firmware upload is now opt-in: Android shows the chip already runs
+#      0x0054 and is never reflashed, and our blob was a different variant.
+# r49: GENI DMA back on, firmware upload opt-in.
+# r50: reset released during power-up (GPIOD_OUT_LOW) like the stock driver.
+# r51: assert reset, cycle rails, release reset so on-chip firmware boots.
+# r52: touch avdd back to the stock 3.3 V (L28). At 2.856 V the FTS firmware
+#      never boots: the chip ACKs I2C but every read returns 0.
+# r53: L28 keeps its safe range and the touch driver raises avdd to the
+#      stock 3.3 V itself (fixed 3.3 V in DT crashes RPMh).
+# r53: raise touch avdd to 3.3 V from the driver instead of pinning L28 in DT.
+# r54: avdd to 3.312 V (top 8 mV step); 3.300 V is not a valid PM8998 level.
+# r54: avdd to 3.312 V (top 8 mV step).
+# r54: avdd to 3.312 V.
+# r54: avdd to 3.312 V.
+# r55: raise avdd (supplies[1], L28) to 3312 mV - the previous attempt hit vdd.
+# r56: avdd voltage change is opt-in (avdd_uv module param); doing it at probe deadlocks RPMh.
+# r57: apply avdd voltage after the rail is enabled and log the real voltage.
+# r58: pin L28 at 3312 mV (top valid step) instead of 2856-3312 mV; the
+#      controller's avdd must match the stock 3.3 V for its firmware to boot.
+# r59: L28 pinned at 3312 mV with stock-style LPM initial mode.
+# r60: L28 at the stock 3.300 V, no forced HPM.
+# r61: correct firmware (chip 36,39 / fw 0x0054) embedded; DTS back to safe L28 range.
+# r62: L28 without forced HPM mode request.
+# r63: keep L28 as XBL configured it; touch uses a fixed 3.3 V supply.
+# r64: dipper touch pinctrl with bias-pull-up on IRQ31/RESET32.
+# r65: vendor-style aggregated RPMh request for L28 (opt-in) and GPIO reset before chip info.
+# r66: touch back to vendor behaviour: real L28 avdd, reset held asserted
+#      during power-up, one reset only, 500 ms CONTROL_READY polling with
+#      3 retries, 144-byte chip-info read with 0xA5 check.
+# r67: aggregated RPMh request now owns the avdd rail (no disable/enable afterwards)\n#      and rails are only disabled when actually enabled.
+# r68: change avdd after the rails are off and the RPMh TCS has drained\n#      (Android logs show TCS-busy retries; mainline has none).
+# r69: aggregate voltage+enable into one RPMh message (vendor 4.9 behaviour)\n#      and pin L28 at the stock 3.300 V so the FTS firmware can boot.
+# r70: opt-in voltage+enable aggregation via qcom,init-voltage (L28 only).
+# r70: opt-in voltage+enable aggregation via qcom,init-voltage (L28 only).
+# r71: send the init-voltage request asynchronously so a busy TCS cannot stall\n#      RPMh before the root filesystem is mounted.
+# r72: touch vddio moved to the always-on PM8998 L14 (display-independent)
+#      and L28 back to its 2.856-3.312 V range (2.856 V is sufficient).
+# r73: pure mainline stmfts driver (vendor-sequence changes removed) with
+#      touch vddio on the always-on PM8998 L14.
+# r74: FTS5 events are read one at a time (0x85); the old 0x86 bulk read
+#      left garbage in the buffer and made the cursor jump.
+# r74: read FTS5 events one at a time (0x85) to stop the cursor jumping.
+# r75: read one FTS5 event per 0x85 via i2c_transfer (SMBus block added a length byte).
+# r76: 0x86 limited to one 8-byte event (bulk read appended garbage).
+# r76: 0x86 read limited to one 8-byte event.
+# r77: touch abs range 4096x4096 (controller reports 12-bit raw values).
+# r77: touch abs range 4096x4096 (12-bit controller values).
+# r78: touch vdd = dedicated GPIO23 1.8 V fixed regulator, 1080x2248, no pinctrl
+#      (matches the working Mi 8 mainline DT), and the stock stmfts driver.
+# r79: enable qupv3_id_1 + gpi_dma0/1 (real DMA for i2c14); drop both
+#      patches so this is the stock stmfts driver plus the reference DT.
+# r80: touch node copied verbatim from the working mainline DT.
+# r81: panel vddio on L14 like the reference DT; GPIO 23 now belongs only to
+#      the touch controller (both regulators were claiming it).
+# r82: DTS replaced with the working Mi 8 mainline DT (Mechres), unmodified,
+#      to verify touch before merging WiFi/modem back in.
+# r83: explicit gpio31/32 pinctrl so QUP11 cannot keep the touch IRQ/reset muxed.
+# r84: enable &gpu_zap_shader (Adreno zap shader) -- GPU was running degraded.
+# r85: real fix for the touch controller.  Its FIFO speaks the classic ST event
+#      format (vendor fts.c), not the FTM5 one mainline's stmfts5 parser
+#      decodes, so slot id / X / Y were assembled from the wrong bytes -- that
+#      is what made the pointer jump and lag.  stmfts-touch.patch now:
+#        - drains the FIFO the way the vendor does (0x85 -> queue depth in the
+#          low 5 bits of byte 7 -> 0x86 for exactly that many events), instead
+#          of reading a fixed 256 bytes of mostly stale data;
+#        - decodes X/Y/pressure/slot from the classic layout;
+#        - syncs input once per interrupt instead of once per event.
+#      The touch node also declares the controller's real Y range (2160).
+# r86: the r85 parser was a wrong guess -- this controller really does speak
+#      FTS5 (see the reference bring-up log), and 0x85/FIFO-depth did not drain
+#      the queue at all: the IRQ line stayed asserted and fired 170k times while
+#      every read came back zero.  Back to the stock 0x86 + 256 byte read and the
+#      stock FTS5 parser, plus two module parameters so the real byte layout and
+#      the scan-mode value can be checked without another rebuild:
+#        dump_batches=N  hexdump the raw FIFO of the first N interrupts
+#        scan_mode=VAL   value sent with 0xa0 (0 disables the write)
+# r87: the controller never reported a contact because nothing ever armed it.
+#      Downstream does three things mainline's FTS5 path does not, and all three
+#      are now in stmfts-touch.patch:
+#        - HW register 0x002c (interrupt sources) gets 0x41, mainline wrote 0x01,
+#          which leaves the touch event source masked;
+#        - "sense on without calibration" is the two byte command 0x93 0x01 (the
+#          vendor comments out the plain one byte form), sent at probe and after
+#          every wake-up;
+#        - 0xa0 is not a command this part knows, it is only written when
+#          scan_mode is set explicitly (and it makes the chip stream ten bogus
+#          zero-pressure motion slots).
+# r89: touch finally explained.  The controller runs host-loaded firmware:
+#      the downstream driver always flashes st_fts_e1.ftb at probe (keeping the
+#      CX calibration pages), and without it the part ACKs I2C but never starts
+#      -- every register readback is zero and no interrupt ever fires.  That is
+#      why the panel worked after a warm reboot (firmware still in RAM from
+#      Android) and went silent after the first real power cycle.
+#      stmfts-touch.patch now: probes CONTROL_READY after reset, flashes the
+#      firmware from /lib/firmware when it is not alive (warm boot, flash
+#      unlock, page erase with CX kept, DMA fill of code+config, reset), then
+#      arms IER=0x41 and sends the 0x93 0x01 sense-on pair.
+# r101: sense-on 必须是 {0xa0, 0x00, 0x01}（多指扫描）。
+#       0xff 会打开额外的扫描模式，正是把 Mi 8 触摸弄成幽灵触控的原因；
+#       上游 v6 与实测均确认 0x01 正确。arm 顺序：CONTROL_READY -> IER=0x41 -> sense-on。
+#       改这段前先读 docs/PROGRESS.md，别再按 0xff/0x93 试。
+pkgrel=109
+pkgdesc="Mainline SDM845 kernel with Xiaomi Mi 8 (dipper) DTS and Samsung EA8074 panel"
+arch="aarch64"
+_carch="arm64"
+url="https://gitlab.com/sdm845-mainline/linux"
+license="GPL-2.0-only"
+options="
+	!check
+	!strip
+	!tracedeps
+	pmb:cross-native
+	pmb:kconfigcheck-community
+	pmb:kconfigcheck-lockdown
+"
+makedepends="
+	bison
+	clang
+	elfutils-dev
+	findutils
+	flex
+	linux-headers
+	lld
+	llvm
+	openssl-dev
+	pahole
+	perl
+	postmarketos-installkernel
+	python3
+	zstd
+"
+
+_tag="sdm845-7.1-rc1-r0"
+
+source="
+	linux-$_tag.tar.gz::https://gitlab.com/sdm845-mainline/linux/-/archive/$_tag/linux-$_tag.tar.gz
+	config-$_flavor.aarch64
+	sdm845-xiaomi-dipper.dts
+	panel-samsung-ea8074.c
+	stmfts-touch.patch
+"
+builddir="$srcdir/linux-$_tag"
+
+prepare() {
+	default_prepare
+	cp "$srcdir/config-$_flavor.$CARCH" .config
+
+	# --- Device tree -------------------------------------------------
+	# sdm845-xiaomi-beryllium-common.dtsi already ships in this kernel
+	# branch, so the new DTS only needs to be compiled alongside it.
+	cp "$srcdir/sdm845-xiaomi-dipper.dts" \
+		"arch/$_carch/boot/dts/qcom/"
+	printf 'dtb-$(CONFIG_ARCH_QCOM)\t+= sdm845-xiaomi-dipper.dtb\n' \
+		>> "arch/$_carch/boot/dts/qcom/Makefile"
+
+	# --- Panel driver ------------------------------------------------
+	# Built-in (obj-y) instead of a Kconfig symbol: the DPU must take
+	# ownership of the bootloader's continuous-splash MDSS DMA before
+	# qnoc-sdm845 sync_state() drops its boot bandwidth votes.
+	cp "$srcdir/panel-samsung-ea8074.c" drivers/gpu/drm/panel/
+	printf 'obj-y\t+= panel-samsung-ea8074.o\n' \
+		>> drivers/gpu/drm/panel/Makefile
+
+
+
+
+
+}
+
+build() {
+	unset LDFLAGS
+	make ARCH="$_carch" LLVM=1 \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-$_flavor"
+}
+
+package() {
+	if [ -e "$builddir/arch/$_carch/boot/vmlinuz.efi" ]; then
+		install -Dm644 "$builddir/arch/$_carch/boot/vmlinuz.efi" \
+			"$pkgdir/boot/linux.efi"
+		install -Dm644 "$builddir/arch/$_carch/boot/vmlinuz" \
+			"$pkgdir/boot/vmlinuz"
+	else
+		echo "WARNING: CONFIG_ZBOOT not enabled!"
+		install -Dm644 "$builddir/arch/$_carch/boot/Image.gz" \
+			"$pkgdir/boot/vmlinuz"
+	fi
+
+	make modules_install dtbs_install \
+		ARCH="$_carch" \
+		LLVM=1 \
+		INSTALL_PATH="$pkgdir"/boot/ \
+		INSTALL_MOD_PATH="$pkgdir"/usr/ \
+		INSTALL_MOD_STRIP=1 \
+		INSTALL_DTBS_PATH="$pkgdir"/boot/dtbs-tmp
+
+	mkdir -p "$pkgdir"/boot/dtbs/qcom
+	cp -r "$pkgdir"/boot/dtbs-tmp/qcom/sdm8* "$pkgdir"/boot/dtbs/qcom
+	rm -rf "$pkgdir"/boot/dtbs-tmp
+
+	rm -f "$pkgdir"/usr/lib/modules/*/build "$pkgdir"/usr/lib/modules/*/source
+
+	install -D "$builddir"/include/config/kernel.release \
+		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+}
+
+sha512sums="
+94da173aaf74dd33ef8ff9015e92759481cd0da5bd8a1e52c8664fd372d48a1155655001ad2e9d26557733c71ae8bc448e4ebdf1372b8f32159907a35f0306a9  linux-sdm845-7.1-rc1-r0.tar.gz
+cfa36909513e2659e86af3de706f2f160bfeeeb9132c494fc4274f68e8f7cbf46d33b5b0d4ed147e04ee450a643398b0fdfc87b657e0d46374c59787a9d42301  config-postmarketos-qcom-sdm845-dipper.aarch64
+8c4ea2bc8570bd7e833f8c94bad160b767dd9643e759b953c17e6e7fe79ffedee1d1d61dc0fd46bb5c513b3446fb783f16739a8e0752659c13b54501170ace88  sdm845-xiaomi-dipper.dts
+291d8adcda4e7be1a9643bae8c91b2ad4b360905d4b57d99085d2cf69093b06662c3ecd2cff68ab8b3a9d7460df3a1c27e6b82e0b52c1070a014f959563f482a  panel-samsung-ea8074.c
+41f0c9ff8ca94bdf790da3791048143fc31ab30a9ff177085f2768c44805b2284b28cdd6b9e74376881f86423cdaf55c7fb8ecff30e2b08c208d4b18718f19c6  stmfts-touch.patch
+"

@@ -1,0 +1,12 @@
+[Unit]
+Description=Enable ambient light based brightness
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/bin/gsettings set org.gnome.settings-daemon.plugins.power ambient-enabled true; /usr/bin/gsettings set org.gnome.settings-daemon.plugins.power ambient-enabled true'
+
+[Install]
+WantedBy=graphical-session.target

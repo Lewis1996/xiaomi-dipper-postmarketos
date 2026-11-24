@@ -1,0 +1,7 @@
+[Unit]
+Description=Keep the pmOS RNDIS gadget alive (rebind UDC when unbound)
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/usb-gadget-fixup.sh

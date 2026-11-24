@@ -1,0 +1,17 @@
+--- a/drivers/i2c/busses/i2c-qcom-geni.c
++++ b/drivers/i2c/busses/i2c-qcom-geni.c
+@@ -1102,6 +1102,14 @@
+ 		fifo_disable = readl_relaxed(gi2c->se.base + GENI_IF_DISABLE_RO) & FIFO_IF_DISABLE;
+ 	}
+ 
++	/* r25: let DT force the FIFO/PIO path when the SE has a FIFO.
++	 * NOTE: on this board a98000.i2c reports FIFO disabled, so the
++	 * whole touch bus still runs through GPI; r27 moved touch to
++	 * i2c-gpio instead, which is what actually fixed it.
++	 */
++	if (of_property_read_bool(dev->of_node, "qcom,no-dma") && !fifo_disable)
++		gi2c->no_dma = true;
++
+ 	if (fifo_disable) {
+ 		/* FIFO is disabled, so we can only use GPI DMA */
+ 		gi2c->gpi_mode = true;

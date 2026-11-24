@@ -1,0 +1,89 @@
+# Reference: https://wiki.nura.eco/wiki/Device_specific_package
+# Modeled on Nura pmaports device/community/device-xiaomi-beryllium
+# (the closest, actively maintained SDM845 Xiaomi port).
+maintainer="dipper local port <dipper@example.com>"
+pkgname=device-xiaomi-dipper
+pkgdesc="Xiaomi Mi 8 (dipper, 6GB+128GB)"
+pkgver=1
+# r5: put st_fts_e1.ftb into the initramfs too -- the controller probes
+#      (and is flashed) before the real root is mounted, so the firmware
+#      must travel with the initramfs or request_firmware returns -ENOENT.
+# r4: ship st_fts_e1.ftb, the touch controller's firmware.  The part is
+#      host-loaded: without this download it ACKs I2C but never starts
+#      (every register reads back zero, no interrupts).  The kernel driver
+#      requests qcom/sdm845/Xiaomi/dipper/st_fts_e1.ftb at probe and flashes
+#      it with the CX (calibration) pages preserved.
+# r3: ship the dipper Adreno zap shader plus the mkinitfs file list that puts
+#     it into the initramfs.  The GPU probes before the real root is mounted,
+#     so without this the driver failed with -ENOENT, GPU hw init was skipped
+#     and the whole desktop fell back to llvmpipe (that is the lag).
+# r2: ship the RNDIS gadget fixup (service+timer) and mask usb-signaller,
+#     so the phone always enumerates as a USB NIC after boot.
+# r1: RNDIS USB network + console=tty0/loglevel=8 for visible debug output
+pkgrel=5
+url="https://wiki.nura.eco/wiki/Xiaomi_Mi_8_(SDM845)_(xiaomi-dipper,_xiaomi-equuleus,_xiaomi-ursa)"
+license="MIT"
+arch="aarch64"
+options="!check !archcheck !strip"
+depends="
+	alsa-ucm-conf-sdm845
+	firmware-xiaomi-beryllium
+	hexagonrpcd
+	linux-firmware-qcom
+	linux-postmarketos-qcom-sdm845-dipper
+	mkbootimg
+	postmarketos-base
+	soc-qcom
+	soc-qcom-modem
+"
+makedepends="devicepkg-dev"
+install="$pkgname.post-install"
+source="
+	deviceinfo
+	kernel-cmdline.conf
+	modules-initfs
+	usb-gadget-fixup.sh
+	usb-gadget-fixup.service
+	usb-gadget-fixup.timer
+	a630_zap.mbn
+	st_fts_e1.ftb
+	00-device-xiaomi-dipper-gpu.files
+"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+
+	# Keep the phone's USB NIC up by ourselves: write the gadget directly to
+	# configfs instead of letting usb-signaller pick a mode.
+	install -Dm755 "$srcdir"/usb-gadget-fixup.sh 		"$pkgdir"/usr/bin/usb-gadget-fixup.sh
+	install -Dm644 "$srcdir"/usb-gadget-fixup.service 		"$pkgdir"/etc/systemd/system/usb-gadget-fixup.service
+	install -Dm644 "$srcdir"/usb-gadget-fixup.timer 		"$pkgdir"/etc/systemd/system/usb-gadget-fixup.timer
+
+	# Adreno zap shader for this panel/board combination, plus the mkinitfs
+	# file list that pulls the GPU firmware into the initramfs.
+	install -Dm644 "$srcdir"/a630_zap.mbn \
+		"$pkgdir"/usr/lib/firmware/qcom/sdm845/Xiaomi/dipper/a630_zap.mbn
+	install -Dm644 "$srcdir"/st_fts_e1.ftb \
+		"$pkgdir"/usr/lib/firmware/qcom/sdm845/Xiaomi/dipper/st_fts_e1.ftb
+	install -Dm644 "$srcdir"/00-device-xiaomi-dipper-gpu.files \
+		"$pkgdir"/usr/share/mkinitfs/files/00-device-xiaomi-dipper-gpu.files
+}
+
+# NOTE: after editing any of the source files, regenerate checksums with
+#   pmbootstrap checksum device-xiaomi-dipper
+# (03-build.sh does this automatically).
+sha512sums="
+d02c724773bdaf1e2aac04c81459f0f06d2d20e063b3248f56d903d099239aa6f04028694c3eb77456546c45cc0ebcc7a2dac943b61451e002c181999ee92d92  deviceinfo
+391cc6f6c0ba4b626a2bb22bbf49ab1a038ea245d0e144ec81b8e3d295de2e1c3d931b88227f108f287738f2eaf3d1730bed8760cfa383ec7fc568a95c93d8ab  kernel-cmdline.conf
+149fa1d44401708cf42f3244eda93fec97f321fc406d17ff92a16e12a3ce1b5a7245167eb87a794713539bd30fd0a9ef9c2164a120cd4d4c7d386a5396fe01eb  modules-initfs
+5bf3fbc1b6c183478585ca8b6e3d878e4b6bd80448bc55d7431fef35506b0f3d69f259bc3a7e0624cf94e3c30b655bb12065a16e8ee99b0f6d6bfaad6c7a9101  usb-gadget-fixup.sh
+41fe6ed2065d1ab398d23402e52f39eeecbe100107293dec002316ceb575720b8cc50d7ad22953e07bd3a548f7a0d1a27b9d350ad921d9b8ddbe8e4734c536ef  usb-gadget-fixup.service
+11f0dfddd01148467c00631a7fee05fd1e7b13a10da356c81276b9f151d22a8941d2ac0fced8babc14781eb5ec56b9edea3750c605c42e3f7ac313aa84310d6f  usb-gadget-fixup.timer
+b1a3042dcf17ff916ab1251f7fb1755fa8eb5a453b90f4782f017e9cd195fd5313037024230561812a8eb179d50c5f26a9b5661a94c15d00cea799b0f385fd8c  a630_zap.mbn
+faf92b38837428fe7e8106b8c333191a7b82b63589bab06a8145f03719db66920f671121166b4365b6299f4690fbda3a6a8548cb4f06fcf34ba6880c19edda11  st_fts_e1.ftb
+30d287c9b6460a8ae8568dd2fb4fc2582bb85b538a7661c1b6864f1be130f987191de7f42514c493a0de6c73106d66b12251eff1147f6c3625ed9521642bd3bc  00-device-xiaomi-dipper-gpu.files
+"

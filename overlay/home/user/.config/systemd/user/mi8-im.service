@@ -1,0 +1,12 @@
+[Unit]
+Description=Set IBus pinyin input sources + on-screen keyboard
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/bin/gsettings set org.gnome.desktop.input-sources sources "[('"'"'xkb'"'"', '"'"'us'"'"'), ('"'"'ibus'"'"', '"'"'libpinyin'"'"')]"; /usr/bin/gsettings set org.gnome.desktop.input-sources mru-sources "[('"'"'ibus'"'"', '"'"'libpinyin'"'"'), ('"'"'xkb'"'"', '"'"'us'"'"')]"; /usr/bin/gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled true'
+
+[Install]
+WantedBy=graphical-session.target

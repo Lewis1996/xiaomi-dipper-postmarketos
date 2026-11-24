@@ -1,0 +1,16 @@
+#!/bin/sh
+# dipper: the stock pmOS stack leaves the USB role to usb-signaller, whose
+# GUI defaults to "Developer mode" (ADB/NCM) — Windows then never sees a NIC
+# and we lose ssh/telnet.  This device ships its own configfs RNDIS gadget, so
+# mask the signaller units and keep the fixup timer running.
+post_install() {
+	systemctl daemon-reload >/dev/null 2>&1 || true
+	for u in usb-signaller.service \
+		 usb-signaller-developer-mode.service \
+		 usb-signaller-mtp-mode.service \
+		 usb-signaller-tethering-mode.service; do
+		systemctl mask "$u" >/dev/null 2>&1 || true
+	done
+	systemctl enable usb-gadget-fixup.timer >/dev/null 2>&1 || true
+	systemctl start usb-gadget-fixup.timer >/dev/null 2>&1 || true
+}

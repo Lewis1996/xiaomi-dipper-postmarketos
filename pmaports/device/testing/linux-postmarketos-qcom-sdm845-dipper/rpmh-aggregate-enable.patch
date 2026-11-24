@@ -1,0 +1,83 @@
+--- a/drivers/regulator/qcom-rpmh-regulator.c
++++ b/drivers/regulator/qcom-rpmh-regulator.c
+@@ -164,6 +164,7 @@
+ 	bool				bypassed;
+ 	int				voltage_selector;
+ 	unsigned int			mode;
++	u32				init_voltage;
+ };
+ 
+ /**
+@@ -264,21 +265,45 @@
+ 					bool enable)
+ {
+ 	struct rpmh_vreg *vreg = rdev_get_drvdata(rdev);
+-	struct tcs_cmd cmd = {
+-		.addr = vreg->addr + RPMH_REGULATOR_REG_ENABLE,
+-		.data = enable,
+-	};
+-	int ret;
+-
+-	if (vreg->enabled == -EINVAL &&
+-	    vreg->voltage_selector != -ENOTRECOVERABLE) {
+-		ret = _rpmh_regulator_vrm_set_voltage_sel(rdev,
+-						vreg->voltage_selector, true);
+-		if (ret < 0)
+-			return ret;
++	struct tcs_cmd cmd[3];
++	int n = 0, ret;
++
++	/* r70: opt-in aggregation, only for regulators that carry
++	 * "qcom,init-voltage".  Sending a voltage update on its own makes the
++	 * RPMh TCS never complete on dipper (that is why every earlier
++	 * set_voltage attempt hung the phone), while the stock driver sends
++	 * voltage+enable in one message.
++	 */
++	if (enable && vreg->init_voltage && vreg->enabled == -EINVAL) {
++		cmd[n].addr = vreg->addr + RPMH_REGULATOR_REG_VRM_VOLTAGE;
++		cmd[n].data = DIV_ROUND_UP(vreg->init_voltage, 1000);
++		n++;
++
++		cmd[n].addr = vreg->addr + RPMH_REGULATOR_REG_ENABLE;
++		cmd[n].data = 1;
++		n++;
++
++		/* r71: asynchronous send -- a synchronous rpmh_write() blocks the
++		 * whole RPMh state machine when the TCS is busy, which happens
++		 * before the root filesystem is even mounted (stmfts is
++		 * built-in).  async returns immediately and never stalls UFS.
++		 */
++		ret = rpmh_write_async(vreg->dev, RPMH_ACTIVE_ONLY_STATE,
++				       cmd, n);
++		if (!ret) {
++			vreg->enabled = true;
++			return 0;
++		}
++
++		dev_info(vreg->dev,
++			 "init-voltage async failed: %d\n", ret);
++		/* fall through to a plain enable */
+ 	}
+ 
+-	ret = rpmh_regulator_send_request(vreg, &cmd, enable);
++	cmd[0].addr = vreg->addr + RPMH_REGULATOR_REG_ENABLE;
++	cmd[0].data = enable;
++
++	ret = rpmh_regulator_send_request(vreg, &cmd[0], enable);
+ 	if (!ret)
+ 		vreg->enabled = enable;
+ 
+@@ -502,6 +527,13 @@
+ 
+ 	vreg->always_wait_for_ack = of_property_read_bool(node,
+ 						"qcom,always-wait-for-ack");
++
++	/* r70: optional vendor-style initial voltage (uV).  When present the
++	 * first enable sends this voltage together with the enable bit in one
++	 * RPMh message, exactly like the stock 4.9 driver's
++	 * rpmh_regulator_send_aggregate_requests().
++	 */
++	of_property_read_u32(node, "qcom,init-voltage", &vreg->init_voltage);
+ 
+ 	vreg->rdesc.owner	= THIS_MODULE;
+ 	vreg->rdesc.type	= REGULATOR_VOLTAGE;

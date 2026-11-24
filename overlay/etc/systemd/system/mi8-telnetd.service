@@ -1,0 +1,8 @@
+[Unit]
+Description=Mi8 debug telnetd on 2323 (USB only)
+[Service]
+ExecStart=/usr/sbin/telnetd -F -p 2323 -l /bin/sh
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
