@@ -40,7 +40,7 @@ Requirements: a Linux x86_64 host with `pmbootstrap` installed (see
 [docs/BUILD.md](docs/BUILD.md)), ~25 GB free disk.
 
 ```bash
-git clone https://github.com/<you>/xiaomi-dipper-postmarketos.git
+git clone https://github.com/Lewis1996/xiaomi-dipper-postmarketos.git
 cd xiaomi-dipper-postmarketos
 sudo ./scripts/build.sh
 ```
