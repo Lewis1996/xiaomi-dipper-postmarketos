@@ -6,8 +6,8 @@
 # 每次都要读实际 current_max 再决定是否重新写 0。
 set -u
 
-LIMIT=${LIMIT:-80}
-RESUME=${RESUME:-60}
+LIMIT=${LIMIT:-90}
+RESUME=${RESUME:-85}
 ST=/var/lib/mi8-charge-limit.state
 CAP=/sys/class/power_supply/qcom-battery/capacity
 ICM=/sys/class/power_supply/pmi8998-charger/current_max
