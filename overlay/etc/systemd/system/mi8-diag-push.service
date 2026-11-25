@@ -1,7 +1,0 @@
-[Unit]
-Description=Mi8 boot diag push
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/mi8-diag-push.sh
-[Install]
-WantedBy=multi-user.target

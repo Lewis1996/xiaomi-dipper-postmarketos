@@ -35,7 +35,7 @@ fi
 echo "== enabling system units"
 SYS=$M/etc/systemd/system
 mkdir -p "$SYS/multi-user.target.wants" "$SYS/timers.target.wants"
-for u in mi8-telnetd.service mi8-diag-push.service mi8-charge-limit.service \
+for u in mi8-telnetd.service mi8-charge-limit.service \
          mi8-mic-route.service mi8-firstboot.service; do
     [ -f "$SYS/$u" ] && ln -sf "/etc/systemd/system/$u" "$SYS/multi-user.target.wants/$u"
 done
